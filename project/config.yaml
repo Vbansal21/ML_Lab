@@ -1,0 +1,114 @@
+# Configuration for the Stock Prediction Model
+
+# --- Data Loading and Processing ---
+data:
+  tickers: ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META'] # List of stock tickers to download and process.
+  start_date: '2022-01-01'                       # Start date for historical data (YYYY-MM-DD).
+  end_date: '2023-12-31'                         # End date for historical data (YYYY-MM-DD).
+  interval: '1d'                                 # Data interval ('1d', '1h', '1wk', etc.). Use '1d' for daily.
+  features:
+    # Technical indicators to calculate. Add/remove as needed.
+    # Ensure the corresponding calculation logic exists in data_utils.py.
+    sma_windows: [5, 10, 20]      # Simple Moving Average windows.
+    rsi_window: 14                # Relative Strength Index window.
+    macd_params:                  # Moving Average Convergence Divergence parameters.
+      fast_ema: 12
+      slow_ema: 26
+      signal_ema: 9
+    bollinger_window: 20          # Bollinger Bands window.
+    bollinger_std_dev: 2          # Bollinger Bands standard deviation multiplier.
+    calculate_return: true        # Calculate percentage change ('Return').
+  target_features: ['Close', 'Volume'] # List of features the model should predict for the next timestep. Must be a subset of calculated features.
+  test_split_ratio: 0.2           # Proportion of data to use for the validation/test set.
+  window_size: 60                 # Number of past time steps to use as input for predicting the next step.
+  batch_size: 32                  # Number of sequences per batch during training and evaluation.
+
+# --- Model Architecture ---
+model:
+  type: 'UnifiedTransformerAE'      # Model type identifier (currently only supports Transformer AE).
+  ticker_embedding_dim: 32        # Dimension of the learnable embedding for each stock ticker.
+  block_dim: 128                    # Internal dimension of the Transformer blocks (embedding dimension). Must be divisible by num_heads.
+  latent_dim: 64                    # Dimension of the bottleneck layer's output (latent representation).
+  num_heads: 4                      # Number of attention heads in the MultiHeadAttention layers. block_dim must be divisible by this.
+  ff_mult: 4                        # Multiplier for the hidden dimension in the FeedForward layers (hidden_dim = block_dim * ff_mult).
+  dropout: 0.1                      # Dropout rate applied within the model layers.
+  activation: 'ReLU'                # Activation function for FeedForward layers ('ReLU', 'GELU', etc.).
+  normalization: 'LayerNorm'        # Normalization type ('LayerNorm', 'BatchNorm' - BatchNorm might be tricky with sequences).
+
+  # --- Layer and Weight Sharing Configuration ---
+  # Define the structure and weight sharing strategy for transformer layers.
+  # block_weight_indices: A list where each element is an index referring to a unique block instance.
+  # The length of this list determines the total number of layers (num_layers).
+  # Example: [0, 1, 1, 2, 3, 3, 4] means 7 layers total, using 5 unique block instances (indexed 0 to 4).
+  # Layer 0 uses block 0, Layers 1 and 2 use block 1, Layer 3 uses block 2, etc.
+  block_weight_indices: [0, 1, 1, 1, 1, 1, 2, 3, 4, 5, 5, 5, 5, 5, 6] # 15 layers, 7 unique blocks.
+  bottleneck_layer_index: 7         # Index of the layer *before* which the bottleneck projection is applied.
+                                    # E.g., if 7, bottleneck happens after layer 7 (block 3 in the example above) completes.
+
+  # --- Positional Embedding Configuration ---
+  positional_embedding:
+    type: 'XPos'                    # Type of positional embedding ('XPos', 'RoPE', 'Sinusoidal', 'Learned', 'None').
+    max_seq_len_multiplier: 2       # Multiplier for window_size to set max_seq_len for precomputation (e.g., 2 * 60 = 120).
+    # -- RoPE/XPos specific --
+    rope_theta: 10000.0             # Theta parameter for RoPE frequency calculation.
+    # -- XPos specific --
+    xpos_gamma: 0.997               # Decay factor (lambda) for XPos scaling. Smaller values decay faster.
+    xpos_start_layer: 8             # Index of the layer from which to start applying XPos (if type is 'XPos').
+    xpos_apply_alternating: true    # Apply XPos to alternating layers starting from xpos_start_layer.
+
+# --- Training Configuration ---
+training:
+  epochs: 10                        # Maximum number of training epochs.
+  optimizer: 'AdamW'                 # Optimizer type ('Adam', 'AdamW', 'SGD').
+  learning_rate: 0.01              # Initial learning rate for the optimizer.
+  # -- Learning Rate Scheduling (Optional) --
+  lr_scheduler:
+    enabled: true                  # Set to true to enable a learning rate scheduler.
+    type: 'CosineAnnealingLR'                  # Scheduler type ('StepLR', 'ReduceLROnPlateau', 'CosineAnnealingLR').
+    step_size: 10                   # For StepLR: Period of learning rate decay.
+    gamma: 0.1                      # For StepLR/ReduceLROnPlateau: Multiplicative factor of learning rate decay.
+    patience: 5                     # For ReduceLROnPlateau: Number of epochs with no improvement after which learning rate will be reduced.
+    min_lr: 1.0e-6                  # For ReduceLROnPlateau/CosineAnnealingLR: Lower bound on the learning rate.
+  # -- Gradient Clipping (Optional) --
+  gradient_clipping:
+    enabled: true                   # Set to true to enable gradient clipping.
+    max_norm: 1.0                   # Maximum norm of the gradients.
+  # -- Regularization --
+  l1_sparsity_reg: 1.0e-5           # Coefficient for L1 regularization on the latent bottleneck layer activity.
+  # -- Early Stopping --
+  early_stopping:
+    enabled: true                   # Set to true to enable early stopping.
+    patience: 10                    # Number of epochs to wait for improvement in validation loss before stopping.
+    delta: 0.0001                   # Minimum change in validation loss to qualify as an improvement.
+    monitor_metric: 'val_loss_total'# Metric to monitor ('val_loss_total', 'val_loss_recon', 'val_mse').
+
+# --- Evaluation Configuration ---
+evaluation:
+  metrics: ['MSE', 'MAE', 'R2', 'ExplainedVariance', 'MAPE', 'MedianAbsError', 'MaxError', 'DirectionAccuracy'] # Metrics to compute. MaxError calculated per feature. DirectionAccuracy only if 'Close' is a target.
+  direction_accuracy_feature: 'Close' # Feature to use for calculating direction accuracy.
+
+# --- Prediction Configuration ---
+prediction:
+  future_days: 30                   # Number of future days to predict after the end of the historical data.
+  predict_for_tickers: ['AAPL', 'MSFT'] # List of tickers to generate future predictions for (can be a subset of data.tickers or all). Use 'ALL' for all tickers.
+  confidence_intervals:
+    enabled: false                  # Set to true to estimate confidence intervals (e.g., via MC Dropout - requires dropout during inference).
+    mc_dropout_samples: 50          # Number of forward passes for Monte Carlo Dropout estimation.
+
+# --- Paths and Logging ---
+paths:
+  output_dir: 'results_pytorch'     # Base directory for saving plots, logs, and model checkpoints.
+  plot_subdir: 'plots'              # Subdirectory within output_dir for plots.
+  log_subdir: 'logs'                # Subdirectory within output_dir for log files.
+  tensorboard_subdir: 'tensorboard' # Subdirectory within output_dir for TensorBoard logs.
+  model_save_file: 'model_checkpoint.pth' # Filename for saving the trained model checkpoint.
+logging:
+  log_level: 'INFO'                 # Logging level ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL').
+  log_to_file: true                 # Whether to write logs to a file in paths.log_subdir.
+  log_filename: 'training_log.log'  # Name of the log file.
+
+# --- Environment ---
+environment:
+  # device: 'cuda'                  # Device to use ('cuda', 'cpu', or 'auto'). If 'auto', uses CUDA if available, otherwise CPU.
+  device: 'auto'                    # Set to 'auto' by default.
+  seed: 42                          # Random seed for reproducibility. Set to null for no specific seed. 
